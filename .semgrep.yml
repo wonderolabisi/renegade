@@ -1,0 +1,203 @@
+# Custom Semgrep Rules for Renegade Security Analysis
+# Focus on MPC, cryptography, and dark pool specific patterns
+
+rules:
+  # Cryptographic Security Patterns
+  - id: hardcoded-private-key
+    patterns:
+      - pattern: |
+          let $VAR = "$KEY";
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: ^[a-fA-F0-9]{64}$
+    message: Potential hardcoded private key detected
+    severity: ERROR
+    languages: [rust]
+    
+  - id: hardcoded-seed
+    patterns:
+      - pattern: |
+          let $VAR = "$SEED";
+      - metavariable-regex:
+          metavariable: $SEED
+          regex: ^[a-fA-F0-9]{32,}$
+    message: Potential hardcoded seed or secret detected
+    severity: ERROR
+    languages: [rust]
+
+  - id: unsafe-transmute-crypto
+    pattern: |
+      unsafe { std::mem::transmute($X) }
+    message: Unsafe transmute can lead to undefined behavior in crypto contexts
+    severity: WARNING
+    languages: [rust]
+
+  - id: unwrap-in-crypto-operations
+    patterns:
+      - pattern: |
+          $CRYPTO.unwrap()
+      - metavariable-regex:
+          metavariable: $CRYPTO
+          regex: (key|secret|sign|encrypt|decrypt|hash|prove|verify|mpc|circuit)
+    message: Unwrap in cryptographic code can cause panics and break security
+    severity: WARNING
+    languages: [rust]
+
+  - id: expect-in-crypto-operations
+    patterns:
+      - pattern: |
+          $CRYPTO.expect($MSG)
+      - metavariable-regex:
+          metavariable: $CRYPTO
+          regex: (key|secret|sign|encrypt|decrypt|hash|prove|verify|mpc|circuit)
+    message: Expect in cryptographic code can cause panics and break security
+    severity: WARNING
+    languages: [rust]
+
+  # MPC Specific Patterns
+  - id: mpc-share-leakage
+    patterns:
+      - pattern: |
+          println!($SHARE)
+      - metavariable-regex:
+          metavariable: $SHARE
+          regex: (share|secret|private)
+    message: Potential MPC secret share leakage through logging
+    severity: ERROR
+    languages: [rust]
+
+  - id: mpc-timing-attack
+    patterns:
+      - pattern: |
+          if $SECRET == $OTHER { ... }
+      - metavariable-regex:
+          metavariable: $SECRET
+          regex: (secret|private|key)
+    message: Non-constant time comparison may leak timing information
+    severity: WARNING
+    languages: [rust]
+
+  # Memory Safety in Crypto Context
+  - id: crypto-buffer-copy
+    patterns:
+      - pattern: |
+          $BUF.copy_from_slice($SRC)
+      - metavariable-regex:
+          metavariable: $BUF
+          regex: (key|secret|private)
+    message: Buffer copy operations with sensitive data need bounds checking
+    severity: INFO
+    languages: [rust]
+
+  - id: sensitive-data-clone
+    patterns:
+      - pattern: |
+          $SECRET.clone()
+      - metavariable-regex:
+          metavariable: $SECRET
+          regex: (key|secret|private|share)
+    message: Cloning sensitive data may leave copies in memory
+    severity: INFO
+    languages: [rust]
+
+  # Network Security Patterns
+  - id: deserialization-without-bounds
+    pattern: |
+      serde_json::from_slice($DATA)
+    message: Deserialization without size limits can cause DOS attacks
+    severity: WARNING
+    languages: [rust]
+
+  - id: unchecked-network-data
+    patterns:
+      - pattern: |
+          let $VAR = $SOCKET.read($BUF).unwrap();
+      - pattern: |
+          let $VAR = $STREAM.read($BUF).expect($MSG);
+    message: Network data should be validated before use
+    severity: INFO
+    languages: [rust]
+
+  # Concurrency Issues
+  - id: mutex-deadlock-potential
+    pattern: |
+      let $LOCK1 = $MUTEX1.lock().unwrap();
+      let $LOCK2 = $MUTEX2.lock().unwrap();
+    message: Multiple mutex locks in sequence can cause deadlocks
+    severity: WARNING
+    languages: [rust]
+
+  - id: rwlock-writer-starvation
+    pattern: |
+      $RWLOCK.read().unwrap()
+    message: Frequent read locks may starve writers
+    severity: INFO
+    languages: [rust]
+
+  # Dark Pool Specific
+  - id: order-state-leakage
+    patterns:
+      - pattern: |
+          log::$LEVEL!($ORDER)
+      - metavariable-regex:
+          metavariable: $ORDER
+          regex: (order|balance|amount|price)
+    message: Order information should not be logged in plaintext
+    severity: ERROR
+    languages: [rust]
+
+  - id: wallet-state-exposure
+    patterns:
+      - pattern: |
+          println!($WALLET)
+      - metavariable-regex:
+          metavariable: $WALLET
+          regex: (wallet|balance|portfolio)
+    message: Wallet state should remain private
+    severity: ERROR
+    languages: [rust]
+
+  # Zero-Knowledge Specific
+  - id: constraint-system-debug
+    patterns:
+      - pattern: |
+          $CS.debug()
+      - pattern: |
+          println!("{:?}", $CS)
+    message: Constraint system debugging may leak circuit structure
+    severity: WARNING
+    languages: [rust]
+
+  - id: witness-leakage
+    patterns:
+      - pattern: |
+          println!($WITNESS)
+      - metavariable-regex:
+          metavariable: $WITNESS
+          regex: (witness|assignment|value)
+    message: Witness values should not be logged or printed
+    severity: ERROR
+    languages: [rust]
+
+  # Resource Management
+  - id: unbounded-allocation
+    patterns:
+      - pattern: |
+          Vec::with_capacity($SIZE)
+      - metavariable-regex:
+          metavariable: $SIZE
+          regex: (len|size|count)
+    message: Vector allocation with user-controlled size can cause DOS
+    severity: WARNING
+    languages: [rust]
+
+  - id: recursive-function-dos
+    pattern: |
+      fn $FUNC(...) {
+        ...
+        $FUNC(...)
+        ...
+      }
+    message: Recursive functions without depth limits can cause stack overflow
+    severity: INFO
+    languages: [rust]
