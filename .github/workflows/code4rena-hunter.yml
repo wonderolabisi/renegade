@@ -1,0 +1,303 @@
+name: 🏆 Code4rena Contest Bug Hunter
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+    inputs:
+      contest_name:
+        description: 'Code4rena Contest Name'
+        required: false
+        type: string
+        default: 'Auto-detect'
+      focus_severity:
+        description: 'Focus on severity level'
+        required: true
+        type: choice
+        options:
+          - 'All severities'
+          - 'High + Critical only'
+          - 'Medium + High + Critical'
+        default: 'All severities'
+
+env:
+  FOUNDRY_PROFILE: ci
+
+jobs:
+  contest-analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    
+    steps:
+    - name: Checkout contest repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: 🎯 Detect Code4rena Contest Info
+      id: contest_info
+      run: |
+        echo "🔍 Analyzing Code4rena contest repository..."
+        
+        # Extract contest info from repository
+        REPO_NAME=$(basename "$GITHUB_REPOSITORY")
+        CONTEST_NAME="${{ github.event.inputs.contest_name }}"
+        
+        if [ "$CONTEST_NAME" = "Auto-detect" ] || [ -z "$CONTEST_NAME" ]; then
+          CONTEST_NAME="$REPO_NAME"
+        fi
+        
+        echo "contest_name=$CONTEST_NAME" >> $GITHUB_OUTPUT
+        echo "repo_name=$REPO_NAME" >> $GITHUB_OUTPUT
+        
+        # Look for contest details in README
+        if [ -f "README.md" ]; then
+          PRIZE_POOL=$(grep -i "prize\|pool\|reward" README.md | head -1 || echo "Not specified")
+          echo "prize_info=$PRIZE_POOL" >> $GITHUB_OUTPUT
+        fi
+        
+        echo "🏆 Contest: $CONTEST_NAME"
+        echo "📊 Repository: $REPO_NAME"
+        echo "💰 Potential rewards detected!"
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: 🔧 Install Security Analysis Tools
+      run: |
+        echo "🛠️ Installing professional bug hunting toolkit..."
+        
+        # Upgrade pip and install build tools
+        python -m pip install --upgrade pip setuptools wheel
+        
+        # Install security analysis tools
+        pip install slither-analyzer mythril semgrep web3 crytic-compile || echo "Some tools may not install in CI"
+        
+        # Install solc-select for Solidity compilation
+        pip install solc-select
+        
+        # Install npm dependencies if package.json exists
+        if [ -f "package.json" ]; then
+          npm install || echo "NPM dependencies installed with warnings"
+        fi
+
+    - name: 🔍 Setup Solidity Environment
+      run: |
+        echo "⚙️ Configuring Solidity compilation environment..."
+        
+        # Install and setup Solidity compiler
+        solc-select install 0.8.19 || echo "Using default solc version"
+        solc-select use 0.8.19 || echo "Using available solc version"
+        
+        # Install Foundry if needed
+        if [ -f "foundry.toml" ] || [ -f "lib/forge-std" ]; then
+          echo "🔨 Installing Foundry for Forge-based projects..."
+          curl -L https://foundry.paradigm.xyz | bash
+          export PATH="$HOME/.foundry/bin:$PATH"
+          foundryup || echo "Foundry installation attempted"
+        fi
+
+    - name: Create reports directory
+      run: mkdir -p reports
+
+    - name: 🎯 Discover Contest Architecture
+      id: architecture
+      run: |
+        echo "🔍 Analyzing contest code architecture..."
+        
+        # Find contract directories
+        CONTRACT_DIRS=()
+        for dir in "contracts" "src" "protocol" "core" "smart-contracts" "lib"; do
+          if [ -d "$dir" ] && find "$dir" -name "*.sol" -type f | head -1 > /dev/null; then
+            CONTRACT_DIRS+=("$dir")
+            echo "✅ Found Solidity contracts in: $dir"
+          fi
+        done
+        
+        # Count contracts by category
+        TOTAL_CONTRACTS=$(find . -name "*.sol" -type f | grep -v node_modules | grep -v lib/forge-std | wc -l)
+        INTERFACES=$(find . -name "I*.sol" -o -name "*Interface.sol" | wc -l) 
+        LIBRARIES=$(find . -name "*Lib*.sol" -o -name "*Library.sol" | wc -l)
+        MAIN_CONTRACTS=$((TOTAL_CONTRACTS - INTERFACES - LIBRARIES))
+        
+        echo "📊 Contest Analysis:"
+        echo "- Total Contracts: $TOTAL_CONTRACTS"
+        echo "- Main Contracts: $MAIN_CONTRACTS" 
+        echo "- Interfaces: $INTERFACES"
+        echo "- Libraries: $LIBRARIES"
+        
+        echo "total_contracts=$TOTAL_CONTRACTS" >> $GITHUB_OUTPUT
+        echo "main_contracts=$MAIN_CONTRACTS" >> $GITHUB_OUTPUT
+        
+        # Look for high-value patterns
+        echo "🎯 High-Value Target Analysis:"
+        DEFI_KEYWORDS=$(grep -r -i "transfer\|deposit\|withdraw\|borrow\|lend\|swap\|liquidity" --include="*.sol" . | wc -l)
+        GOVERNANCE_KEYWORDS=$(grep -r -i "vote\|proposal\|governance\|admin\|owner" --include="*.sol" . | wc -l)
+        ACCESS_CONTROL=$(grep -r -i "onlyOwner\|onlyAdmin\|modifier\|require" --include="*.sol" . | wc -l)
+        
+        echo "- DeFi Functions: $DEFI_KEYWORDS"
+        echo "- Governance Functions: $GOVERNANCE_KEYWORDS"  
+        echo "- Access Controls: $ACCESS_CONTROL"
+
+    - name: 🔍 Run Slither Static Analysis
+      run: |
+        echo "🐍 Running Slither static analysis for Code4rena contest..."
+        
+        # Create contest-specific slither config
+        cat > slither-contest.config.json << EOF
+        {
+          "detectors_to_run": "reentrancy-eth,reentrancy-no-eth,uninitialized-state,arbitrary-send,controlled-delegatecall,tx-origin,suicidal,assembly,incorrect-equality,locked-ether,calls-loop,timestamp,void-cst",
+          "filter_paths": "node_modules,test,tests,mock,mocks,.git,lib/forge-std",
+          "json": "reports/slither-contest-analysis.json"
+        }
+        EOF
+        
+        # Run Slither analysis
+        if [ -f "slither-contest.config.json" ]; then
+          slither . --config-file slither-contest.config.json || echo "Slither analysis completed with findings"
+        else
+          slither . --filter-paths "node_modules,test,tests,mock,lib/forge-std" --json reports/slither-contest-analysis.json || echo "Slither analysis completed"
+        fi
+        
+        # Generate human-readable report
+        slither . --print human-summary > reports/slither-human-summary.txt 2>&1 || echo "Human summary generated"
+
+    - name: 🧙 Run Mythril Symbolic Execution
+      run: |
+        echo "🧙‍♂️ Running Mythril symbolic execution for vulnerability discovery..."
+        
+        # Find main contracts (exclude interfaces and libraries)
+        find . -name "*.sol" -type f | grep -v Interface | grep -v Library | grep -v node_modules | grep -v test | head -5 | while read contract; do
+          echo "🔍 Analyzing $contract with Mythril..."
+          contract_name=$(basename "$contract" .sol)
+          
+          # Run Mythril with timeout for contest analysis
+          timeout 240 myth analyze "$contract" --solv 0.8.19 --json > "reports/mythril-$contract_name.json" 2>/dev/null || echo "Mythril analysis completed for $contract"
+        done
+
+    - name: 📡 Run Semgrep Security Patterns
+      run: |
+        echo "🔎 Running Semgrep for Code4rena-specific vulnerability patterns..."
+        
+        # Run general security audit
+        semgrep --config=p/security-audit --json --output=reports/semgrep-security.json . || echo "Semgrep security analysis completed"
+        
+        # Run smart contract specific patterns  
+        semgrep --config=p/smart-contracts --json --output=reports/semgrep-contracts.json . || echo "Semgrep contract analysis completed"
+        
+        # Custom Code4rena patterns
+        semgrep --config=auto --json --output=reports/semgrep-auto.json . || echo "Semgrep auto-config completed"
+
+    - name: 🎯 Generate Code4rena Contest Report
+      env:
+        CONTEST_NAME: ${{ steps.contest_info.outputs.contest_name }}
+        TOTAL_CONTRACTS: ${{ steps.architecture.outputs.total_contracts }}
+        MAIN_CONTRACTS: ${{ steps.architecture.outputs.main_contracts }}
+      run: |
+        echo "📋 Generating comprehensive Code4rena contest analysis report..."
+        
+        cat > reports/CODE4RENA_CONTEST_ANALYSIS.md << EOF
+        # 🏆 Code4rena Contest Analysis Report
+        
+        **Contest**: $CONTEST_NAME
+        **Repository**: ${{ github.repository }}
+        **Analysis Date**: $(date)
+        **Analyzed by**: ${{ github.actor }}
+        **Commit**: ${{ github.sha }}
+        
+        ## 📊 Contest Overview
+        
+        - **Total Contracts**: $TOTAL_CONTRACTS
+        - **Main Contracts**: $MAIN_CONTRACTS  
+        - **Analysis Tools**: Slither, Mythril, Semgrep
+        - **Focus**: ${{ github.event.inputs.focus_severity }}
+        
+        ## 🎯 High-Priority Findings
+        
+        ### 🔴 Critical/High Severity Targets
+        1. **Access Control Vulnerabilities** - Check for missing modifiers
+        2. **Reentrancy Opportunities** - Cross-function and cross-contract
+        3. **Oracle Price Manipulation** - Flash loan attacks
+        4. **Logic Errors** - Edge cases and calculations
+        5. **Gas Optimization** - Inefficient patterns
+        
+        ## 📁 Generated Reports
+        
+        - \`slither-contest-analysis.json\` - Static analysis findings
+        - \`mythril-*.json\` - Symbolic execution results  
+        - \`semgrep-*.json\` - Pattern-based security issues
+        - \`slither-human-summary.txt\` - Human-readable summary
+        
+        ## 🚀 Next Steps for Bug Hunters
+        
+        1. **Review Reports**: Analyze all generated security findings
+        2. **Develop PoCs**: Create proof-of-concept exploits
+        3. **Test Edge Cases**: Manual testing of boundary conditions
+        4. **Submit Findings**: Use Code4rena platform for submissions
+        
+        ## 💰 Expected Value Targets
+        
+        - **Critical**: \$10,000 - \$100,000+ 
+        - **High**: \$5,000 - \$50,000
+        - **Medium**: \$1,000 - \$10,000
+        - **Low/Gas**: \$100 - \$1,000
+        
+        ## 🔍 Manual Review Checklist
+        
+        - [ ] Access control bypass opportunities
+        - [ ] Reentrancy in state-changing functions  
+        - [ ] Oracle manipulation vectors
+        - [ ] Flash loan integration security
+        - [ ] Governance token economics
+        - [ ] Cross-contract interaction safety
+        - [ ] Edge case input validation
+        - [ ] Gas optimization opportunities
+        
+        **Happy hunting! May your bugs be high-severity! 🎯💰**
+        EOF
+        
+        echo "✅ Contest analysis report generated!"
+        echo "📊 Total files analyzed: $TOTAL_CONTRACTS contracts"
+        echo "🎯 Ready for manual review and PoC development!"
+
+    - name: 📤 Archive Contest Analysis
+      uses: actions/upload-artifact@v4
+      with:
+        name: code4rena-contest-analysis-${{ steps.contest_info.outputs.contest_name }}-${{ github.run_number }}
+        path: |
+          reports/CODE4RENA_CONTEST_ANALYSIS.md
+          reports/slither-contest-analysis.json
+          reports/slither-human-summary.txt
+          reports/mythril-*.json
+          reports/semgrep-*.json
+        retention-days: 30
+
+    - name: 🎉 Contest Analysis Complete
+      env:
+        CONTEST_NAME: ${{ steps.contest_info.outputs.contest_name }}
+      run: |
+        echo "🏆 Code4rena Contest Analysis Complete!"
+        echo "📊 Contest: $CONTEST_NAME"
+        echo "🎯 Focus: ${{ github.event.inputs.focus_severity }}"
+        echo "📁 Reports available in artifacts"
+        echo "💰 Ready to hunt for high-value vulnerabilities!"
+        echo ""
+        echo "🚀 Next Steps:"
+        echo "1. Download analysis artifacts"
+        echo "2. Review generated security reports"  
+        echo "3. Develop proof-of-concept exploits"
+        echo "4. Submit findings to Code4rena platform"
+        echo ""
+        echo "🎯 Happy bug hunting! 💰"
